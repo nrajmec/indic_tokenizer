@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # indic-tokenizer
 
 A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with Claude-style special token support.
