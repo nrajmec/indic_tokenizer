@@ -1,0 +1,22 @@
+# Core (always required)
+regex>=2023.0
+numpy>=1.24
+
+# Parquet / CSV loading
+pandas>=1.5
+pyarrow>=10
+
+# Progress bars
+tqdm>=4.0
+
+# HuggingFace dataset downloads
+datasets>=2.0
+huggingface_hub>=0.16
+
+# SentencePiece support  (optional — only needed for algorithm="sentencepiece")
+sentencepiece>=0.1.99
+
+# GPU-accelerated pair counting  (optional — install one of these)
+# torch>=2.0          # PyTorch CUDA
+# cupy-cuda12x        # CuPy for CUDA 12.x (faster than PyTorch for this use case)
+# cupy-cuda11x        # CuPy for CUDA 11.x
