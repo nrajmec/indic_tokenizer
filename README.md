@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # indic-tokenizer
 
 A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with Claude-style special token support.
@@ -563,3 +564,7 @@ Base vocab ~= 1 200 tokens  -->  BPE grows this to vocab_size
 ## License
 
 MIT — see [LICENSE](../LICENSE).
+=======
+# indic_tokenizer
+This repository contains code to tokenize indic languages using either BPE or SentencePiece Algorithm
+>>>>>>> ab5deaaff3efb6d76c6bb2a18fd3dca46a5bf7fe
