@@ -10,18 +10,23 @@ Supported scripts: **Devanagari** · **Bengali** · **Gurmukhi** · **Gujarati**
 
 1. [Installation](#installation)
 2. [Supported File Formats](#supported-file-formats)
-3. [Command-Line Usage](#command-line-usage)
-4. [Python API](#python-api)
-   - [Single-shot BPE](#single-shot-bpe-small--medium-corpus)
-   - [Chunked BPE (large corpora)](#chunked-bpe-large-corpora)
-   - [SentencePiece](#sentencepiece)
+3. [Training Modes Overview](#training-modes-overview)
+4. [Command-Line Usage](#command-line-usage)
+   - [All flags](#all-flags)
+   - [Mode 1: Single-shot BPE](#mode-1-single-shot-bpe-cli)
+   - [Mode 2: SentencePiece](#mode-2-sentencepiece-cli)
+   - [Mode 3: Chunked BPE (two-phase)](#mode-3-chunked-bpe-cli)
+5. [Python API](#python-api)
+   - [Mode 1: Single-shot BPE](#mode-1-single-shot-bpe-python)
+   - [Mode 2: SentencePiece](#mode-2-sentencepiece-python)
+   - [Mode 3: Chunked BPE (two-phase)](#mode-3-chunked-bpe-python)
    - [Inference](#inference)
    - [Using IndicDataLoader directly](#using-indicdataloader-directly)
-5. [API Reference](#api-reference)
-6. [Package Structure](#package-structure)
-7. [Special Tokens](#special-tokens)
-8. [Vocabulary Construction](#vocabulary-construction)
-9. [Recommended Vocabulary Sizes](#recommended-vocabulary-sizes)
+6. [API Reference](#api-reference)
+7. [Package Structure](#package-structure)
+8. [Special Tokens](#special-tokens)
+9. [Vocabulary Construction](#vocabulary-construction)
+10. [Recommended Vocabulary Sizes](#recommended-vocabulary-sizes)
 
 ---
 
@@ -75,6 +80,23 @@ pip install -e ".[full]"
 
 ---
 
+## Training Modes Overview
+
+This package supports three training modes. Choose based on your corpus size and tooling preference.
+
+| Mode | Algorithm | When to use | Output |
+|------|-----------|-------------|--------|
+| **Single-shot BPE** | `bpe` + `single` | Corpus fits in RAM (up to ~1 GB) | `vocab.json` + `merges.json` |
+| **SentencePiece** | `sentencepiece` | Need a battle-tested unigram/BPE model | `.model` file |
+| **Chunked BPE** | `bpe` + `chunked` | Corpus is too large for RAM; training spans multiple sessions | `vocab.json` + `merges.json` |
+
+**Chunked BPE runs in two separate phases:**
+
+- **Phase 1 — Accumulate**: Read corpus files, build word-frequency counts, save a checkpoint. Repeat across as many sessions as needed. BPE is not run yet.
+- **Phase 2 — Finalize**: Load the checkpoint and run BPE on the accumulated frequencies. Writes `vocab.json` and `merges.json`. No corpus files needed in this phase.
+
+---
+
 ## Command-Line Usage
 
 The package is runnable directly from the terminal via `python -m indic_tokenizer`.
@@ -82,34 +104,43 @@ The package is runnable directly from the terminal via `python -m indic_tokenize
 ### Synopsis
 
 ```
+# Single-shot and chunked accumulation
 python -m indic_tokenizer --input PATH [OPTIONS]
+
+# Chunked finalize (--input not required)
+python -m indic_tokenizer --mode chunked --finalize --checkpoint STATE [OPTIONS]
 ```
 
 ### All flags
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--input` | `-i` | **required** | Corpus file (`.parquet`, `.csv`, `.txt`, `.json`, `.jsonl`) or glob pattern |
+| `--input` | `-i` | required* | Corpus file (`.parquet`, `.csv`, `.txt`, `.json`, `.jsonl`) or glob pattern. *Optional when `--finalize` is set. |
 | `--vocab-size` | `-v` | `16000` | Target vocabulary size |
 | `--algorithm` | `-a` | `bpe` | `bpe` or `sentencepiece` |
-| `--mode` | `-m` | `single` | `single` (one-shot) or `chunked` (stream, resumable) |
+| `--mode` | `-m` | `single` | `single` (one-shot BPE) or `chunked` (stream, resumable) |
+| `--finalize` | | off | **Chunked mode only.** Skip accumulation; load checkpoint and run BPE to produce `vocab.json` + `merges.json`. `--input` is not needed. |
 | `--vocab-out` | | `vocab.json` | Output path for BPE vocabulary |
 | `--merges-out` | | `merges.json` | Output path for BPE merges |
 | `--output-dir` | `-o` | `.` | Directory for SentencePiece `.model` file |
 | `--model-prefix` | | `indic_tokenizer` | SentencePiece filename prefix |
 | `--text-column` | | `text` | Column / key name for text in tabular or JSON sources |
 | `--max-samples` | | all | Cap on rows / documents loaded |
-| `--checkpoint` | | none | Chunked BPE checkpoint file (auto-resumes if it exists) |
-| `--min-frequency` | | `2` | Prune words below this frequency before chunked BPE |
+| `--checkpoint` | | none | Chunked BPE checkpoint file path (auto-resumes if it exists) |
+| `--min-frequency` | | `2` | Prune words below this frequency before running BPE |
 | `--batch-size` | | `5000` | Rows per batch in chunked mode |
 | `--quiet` | `-q` | off | Suppress all progress output |
 | `--version` | | | Print version and exit |
 
-### CLI examples
+---
 
-#### BPE — single-shot from a parquet file
+### Mode 1: Single-shot BPE (CLI)
+
+Load the entire corpus into RAM and train BPE in one go.
+Best for corpora up to ~1 GB.
 
 ```bash
+# From a parquet file
 python -m indic_tokenizer \
     --input corpus.parquet \
     --vocab-size 16000 \
@@ -117,70 +148,23 @@ python -m indic_tokenizer \
     --merges-out merges.json
 ```
 
-#### BPE — single-shot from a plain-text file
-
 ```bash
+# From a plain-text file
 python -m indic_tokenizer \
     --input corpus.txt \
     --vocab-size 8000
 ```
 
-#### BPE — single-shot from a JSON Lines file with a custom text key
-
 ```bash
+# From a JSON Lines file with a custom text key
 python -m indic_tokenizer \
     --input corpus.jsonl \
     --vocab-size 16000 \
     --text-column content
 ```
 
-#### BPE — chunked training from a single large file
-
 ```bash
-python -m indic_tokenizer \
-    --input data/large_corpus.parquet \
-    --mode chunked \
-    --vocab-size 32000 \
-    --checkpoint checkpoints/state.json
-```
-
-> The checkpoint is created (or updated) after ingestion.  
-> Re-run the **same command** in a later session to resume — already-processed
-> files are skipped automatically.
-
-#### BPE — chunked training from a directory of parquet files
-
-```bash
-# Session 1: process files matching the glob, save checkpoint
-python -m indic_tokenizer \
-    --input "data/sangraha/*.parquet" \
-    --mode chunked \
-    --vocab-size 32000 \
-    --checkpoint checkpoints/state.json \
-    --min-frequency 2
-
-# Session 2: resume from checkpoint (already-done files skipped)
-python -m indic_tokenizer \
-    --input "data/sangraha/*.parquet" \
-    --mode chunked \
-    --vocab-size 32000 \
-    --checkpoint checkpoints/state.json
-```
-
-#### SentencePiece from a plain-text file
-
-```bash
-python -m indic_tokenizer \
-    --input corpus.txt \
-    --algorithm sentencepiece \
-    --vocab-size 16000 \
-    --output-dir models/ \
-    --model-prefix indic_sp
-```
-
-#### Load only a subset of rows (useful for quick tests)
-
-```bash
+# Load only a subset of rows (quick tests)
 python -m indic_tokenizer \
     --input corpus.parquet \
     --vocab-size 4000 \
@@ -190,148 +174,159 @@ python -m indic_tokenizer \
 
 ---
 
+### Mode 2: SentencePiece (CLI)
+
+Delegates to the SentencePiece library. Writes a `.model` file to `--output-dir`.
+
+```bash
+# From a plain-text file
+python -m indic_tokenizer \
+    --input corpus.txt \
+    --algorithm sentencepiece \
+    --vocab-size 16000 \
+    --output-dir models/ \
+    --model-prefix indic_sp
+# Writes: models/indic_sp.model
+```
+
+```bash
+# From a parquet file
+python -m indic_tokenizer \
+    --input corpus.parquet \
+    --algorithm sentencepiece \
+    --vocab-size 32000 \
+    --output-dir models/
+```
+
+---
+
+### Mode 3: Chunked BPE (CLI)
+
+Chunked BPE splits training into two phases. You run Phase 1 one or more times
+to accumulate word frequencies, then run Phase 2 once to finalize.
+
+#### Phase 1 — Accumulate (one or more sessions)
+
+Each session reads a corpus file, updates word frequencies, and saves a checkpoint.
+Re-run with the same `--checkpoint` path to resume; already-processed files
+inside the checkpoint are skipped automatically.
+
+```bash
+# Session 1: ingest first file
+python -m indic_tokenizer \
+    --input data/corpus-part0.parquet \
+    --mode chunked \
+    --checkpoint checkpoints/state.json
+
+# Session 2: ingest a second file (part0 is already counted, skipped)
+python -m indic_tokenizer \
+    --input data/corpus-part1.parquet \
+    --mode chunked \
+    --checkpoint checkpoints/state.json
+
+# Or use a glob to process many files in one session
+python -m indic_tokenizer \
+    --input "data/sangraha/*.parquet" \
+    --mode chunked \
+    --checkpoint checkpoints/state.json \
+    --min-frequency 2
+```
+
+> **Note:** You can run as many accumulation sessions as needed — each one
+> merges new counts into the existing checkpoint. No BPE is run yet.
+
+#### Phase 2 — Finalize (run once, after all accumulation is done)
+
+When you are satisfied that all corpus data has been accumulated, run the
+finalize step. `--input` is **not** required here — the checkpoint already
+holds all the word frequencies.
+
+```bash
+python -m indic_tokenizer \
+    --mode chunked \
+    --finalize \
+    --checkpoint checkpoints/state.json \
+    --vocab-size 32000 \
+    --vocab-out vocab.json \
+    --merges-out merges.json
+# Writes: vocab.json  merges.json
+```
+
+#### Full workflow example (3-day corpus, separate sessions)
+
+```bash
+# Day 1 — ingest first batch
+python -m indic_tokenizer \
+    --input "data/batch-0*.parquet" \
+    --mode chunked \
+    --checkpoint checkpoints/state.json
+
+# Day 2 — ingest second batch (batch-0* skipped automatically)
+python -m indic_tokenizer \
+    --input "data/batch-1*.parquet" \
+    --mode chunked \
+    --checkpoint checkpoints/state.json
+
+# Day 3 — finalize, no --input needed
+python -m indic_tokenizer \
+    --mode chunked \
+    --finalize \
+    --checkpoint checkpoints/state.json \
+    --vocab-size 32000
+# Writes: vocab.json  merges.json
+```
+
+---
+
 ## Python API
 
-### Single-shot BPE (small / medium corpus)
+### Mode 1: Single-shot BPE (Python)
 
-Best when the entire corpus fits comfortably in RAM (up to ~1 GB).
+Best when the entire corpus fits comfortably in RAM.
 
 ```python
 from indic_tokenizer import train
 
-# --- From a parquet file ---
+# From a parquet file
 tok = train("corpus.parquet", vocab_size=16_000)
 tok.save("vocab.json", "merges.json")
 
-# --- From a CSV file ---
+# From a CSV file
 tok = train("corpus.csv", vocab_size=16_000)
 
-# --- From a plain-text file ---
-# Each line is a document; lines joined with <|endoftext|>
+# From a plain-text file (each line = one document)
 tok = train("corpus.txt", vocab_size=8_000)
 
-# --- From a JSON Lines file ---
+# From a JSON Lines file
 tok = train("corpus.jsonl", vocab_size=16_000)
 
-# --- From a JSON file (array of {"text": "..."} objects) ---
+# From a JSON file (array of {"text": "..."} objects)
 tok = train("corpus.json", vocab_size=16_000)
 
-# --- From a pandas DataFrame ---
+# From a pandas DataFrame
 import pandas as pd
 df = pd.read_parquet("corpus.parquet")
 tok = train(df, vocab_size=16_000)
 
-# --- From a HuggingFace Dataset ---
+# From a HuggingFace Dataset
 from datasets import load_dataset
 ds = load_dataset("ai4bharat/sangraha", "verified", split="train")
 tok = train(ds, vocab_size=32_000)
 
-# --- From a raw text string ---
+# From a raw text string
 tok = train("नमस्ते दुनिया " * 10_000, vocab_size=4_000)
 
-# --- Custom text column name ---
+# Custom text column name
 tok = train("corpus.parquet", vocab_size=16_000, text_column="content")
 ```
 
 ---
 
-### Chunked BPE (large corpora)
-
-Use `mode="chunked"` when the corpus is too large to fit in RAM.  
-Word-frequency BPE uses ~600 MB regardless of corpus size; the full
-token-ID sequence is never materialised.
-
-#### Option A — via `train()` shortcut
+### Mode 2: SentencePiece (Python)
 
 ```python
 from indic_tokenizer import train
 
-# Step 1: ingest first file — returns a ChunkedBPETrainer
-trainer = train(
-    "data/corpus-part0.parquet",
-    algorithm="bpe",
-    mode="chunked",
-)
-
-# Step 2: add more files one by one
-trainer.add_file("data/corpus-part1.parquet")
-trainer.add_file("data/corpus-part2.txt")    # mixed formats are fine
-
-# Step 3: save a checkpoint (recommended before shutting down)
-trainer.save_state("checkpoints/state.json")
-
-# Step 4: finalise and save
-trainer.finalize_training(vocab_size=32_000, min_frequency=2)
-trainer.tokenizer.save("vocab.json", "merges.json")
-```
-
-#### Option B — via `ChunkedBPETrainer` directly
-
-```python
-from indic_tokenizer import IndicBPETokenizer, ChunkedBPETrainer
-
-tok     = IndicBPETokenizer()
-trainer = ChunkedBPETrainer(tok)
-
-# Add an entire directory using a glob pattern
-trainer.add_directory("data/sangraha/*.parquet")
-
-# Save checkpoint
-trainer.save_state("checkpoints/state.json")
-
-# Finalise
-trainer.finalize_training(vocab_size=32_000, min_frequency=2)
-tok.save("vocab.json", "merges.json")
-```
-
-#### Resuming a previous session
-
-```python
-from indic_tokenizer import IndicBPETokenizer, ChunkedBPETrainer
-
-tok     = IndicBPETokenizer()
-trainer = ChunkedBPETrainer(tok)
-
-# load_state() merges word frequencies and marks previously ingested files
-trainer.load_state("checkpoints/state.json")
-
-# add_directory() automatically skips files listed in the checkpoint
-trainer.add_directory("data/sangraha/*.parquet")
-
-trainer.save_state("checkpoints/state.json")   # update checkpoint
-trainer.finalize_training(vocab_size=32_000)
-tok.save("vocab.json", "merges.json")
-```
-
-#### Multi-session workflow (corpus spread across days)
-
-```python
-# Day 1
-trainer = ChunkedBPETrainer(IndicBPETokenizer())
-trainer.add_directory("data/part-0*.parquet")
-trainer.save_state("checkpoints/day1.json")
-
-# Day 2
-trainer = ChunkedBPETrainer(IndicBPETokenizer())
-trainer.load_state("checkpoints/day1.json")
-trainer.add_directory("data/part-1*.parquet")   # part-0* skipped
-trainer.save_state("checkpoints/day2.json")
-
-# Day 3 — finalise
-trainer = ChunkedBPETrainer(IndicBPETokenizer())
-trainer.load_state("checkpoints/day2.json")
-trainer.finalize_training(vocab_size=32_000, min_frequency=2)
-trainer.tokenizer.save("vocab.json", "merges.json")
-```
-
----
-
-### SentencePiece
-
-```python
-from indic_tokenizer import train
-
-# From any supported file format
 tok = train(
     "corpus.parquet",
     vocab_size=16_000,
@@ -350,8 +345,115 @@ from indic_tokenizer import IndicSentencePieceTokenizer
 tok2 = IndicSentencePieceTokenizer()
 tok2.load("models/indic_sp.model")
 
-# Quick round-trip sanity check
+# Round-trip sanity check
 tok2.verify("வணக்கம் உலகம்")
+```
+
+---
+
+### Mode 3: Chunked BPE (Python)
+
+Use chunked mode when the corpus is too large to fit in RAM.
+Word-frequency BPE uses ~600 MB regardless of corpus size; the full
+token-ID sequence is never materialised.
+
+Chunked BPE has the same two phases as the CLI: accumulate, then finalize.
+
+#### Phase 1 — Accumulate (one or more sessions)
+
+```python
+from indic_tokenizer import IndicBPETokenizer, ChunkedBPETrainer
+import os
+
+CHECKPOINT = "checkpoints/state.json"
+
+tok     = IndicBPETokenizer()
+trainer = ChunkedBPETrainer(tok)
+
+# Resume if a checkpoint already exists
+if os.path.isfile(CHECKPOINT):
+    trainer.load_state(CHECKPOINT)
+
+# Add files (already-ingested files are tracked and skipped)
+trainer.add_file("data/corpus-part0.parquet")
+trainer.add_file("data/corpus-part1.parquet")
+trainer.add_file("data/corpus-part2.txt")   # mixed formats are fine
+
+# Or add an entire directory with a glob
+trainer.add_directory("data/sangraha/*.parquet")
+
+# Save checkpoint — run again later with more files to resume
+trainer.save_state(CHECKPOINT)
+
+print("Words accumulated:", trainer.unique_word_count)
+print("Files done:", trainer.files_done)
+# BPE has NOT been run yet — exit here and come back later
+```
+
+#### Phase 2 — Finalize (run once)
+
+```python
+from indic_tokenizer import IndicBPETokenizer, ChunkedBPETrainer
+
+CHECKPOINT = "checkpoints/state.json"
+
+tok     = IndicBPETokenizer()
+trainer = ChunkedBPETrainer(tok)
+trainer.load_state(CHECKPOINT)           # load all accumulated frequencies
+
+trainer.finalize_training(
+    vocab_size=32_000,
+    min_frequency=2,                     # prune very rare words
+    verbose=True,
+)
+tok.save("vocab.json", "merges.json")
+```
+
+#### Multi-session workflow (corpus spread across days)
+
+```python
+# Day 1
+from indic_tokenizer import IndicBPETokenizer, ChunkedBPETrainer
+
+trainer = ChunkedBPETrainer(IndicBPETokenizer())
+trainer.add_directory("data/part-0*.parquet")
+trainer.save_state("checkpoints/state.json")
+
+# Day 2 — resume (part-0* files already in checkpoint, automatically skipped)
+trainer = ChunkedBPETrainer(IndicBPETokenizer())
+trainer.load_state("checkpoints/state.json")
+trainer.add_directory("data/part-1*.parquet")
+trainer.save_state("checkpoints/state.json")   # update checkpoint in-place
+
+# Day 3 — finalize, no files needed
+trainer = ChunkedBPETrainer(IndicBPETokenizer())
+trainer.load_state("checkpoints/state.json")
+trainer.finalize_training(vocab_size=32_000, min_frequency=2)
+trainer.tokenizer.save("vocab.json", "merges.json")
+```
+
+#### Using the `train()` shortcut for a single accumulation + finalize
+
+If you can do everything in one Python process but still want the memory
+efficiency of chunked mode:
+
+```python
+from indic_tokenizer import train
+
+# train() with mode="chunked" returns a ChunkedBPETrainer (Phase 1 done)
+trainer = train(
+    "data/corpus-part0.parquet",
+    algorithm="bpe",
+    mode="chunked",
+)
+
+# Add more files
+trainer.add_file("data/corpus-part1.parquet")
+trainer.save_state("checkpoints/state.json")
+
+# Phase 2 — finalize
+trainer.finalize_training(vocab_size=32_000, min_frequency=2)
+trainer.tokenizer.save("vocab.json", "merges.json")
 ```
 
 ---
@@ -471,14 +573,14 @@ train(
 
 | Method | Description |
 |--------|-------------|
-| `add_text(text)` | Add a raw string chunk |
-| `add_file(path, ...)` | Add a file (any supported format) |
-| `add_directory(pattern, ...)` | Add all files matching a glob pattern |
-| `add_from_dataset(dataset, ...)` | Add from a HuggingFace Dataset or DataFrame |
-| `finalize_training(vocab_size, ...)` | Run BPE and update `self.tokenizer` |
-| `save_state(path)` | Checkpoint word frequencies to JSON |
-| `load_state(path)` | Restore from checkpoint (merges, does not replace) |
-| `unique_word_count` | Property: number of distinct word types seen |
+| `add_text(text)` | Add a raw string chunk (Phase 1) |
+| `add_file(path, ...)` | Add a file — any supported format (Phase 1) |
+| `add_directory(pattern, ...)` | Add all files matching a glob pattern (Phase 1) |
+| `add_from_dataset(dataset, ...)` | Add from a HuggingFace Dataset or DataFrame (Phase 1) |
+| `finalize_training(vocab_size, ...)` | Run BPE on accumulated frequencies, update `self.tokenizer` (Phase 2) |
+| `save_state(path)` | Checkpoint word frequencies + ingested file list to JSON |
+| `load_state(path)` | Restore checkpoint (merges into current counts, does not replace) |
+| `unique_word_count` | Property: number of distinct word types seen so far |
 | `files_done` | Property: number of files fully processed |
 
 ---
@@ -545,7 +647,7 @@ Step 2 — All assigned Unicode characters across 13 Indic script blocks
 Step 3 — Any additional characters found in the training corpus
 Step 4 — 27 special tokens (injected last so BPE never splits them)
 ------------------------------------------------------------------
-Base vocab ~= 1 200 tokens  -->  BPE grows this to vocab_size
+Base vocab ~= 1 200 tokens  ->  BPE grows this to vocab_size
 ```
 
 ---
@@ -563,7 +665,3 @@ Base vocab ~= 1 200 tokens  -->  BPE grows this to vocab_size
 ## License
 
 MIT — see [LICENSE](../LICENSE).
-=======
-# indic_tokenizer
-This repository contains code to tokenize indic languages using either BPE or SentencePiece Algorithm
->>>>>>> ab5deaaff3efb6d76c6bb2a18fd3dca46a5bf7fe

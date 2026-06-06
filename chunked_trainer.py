@@ -344,7 +344,7 @@ class ChunkedBPETrainer:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
         print(
-            f"Saved state → {path} | "
+            f"Saved state -> {path} | "
             f"files done: {len(self._processed_files)} | "
             f"unique words: {len(self.word_freqs):,}"
         )
@@ -375,7 +375,7 @@ class ChunkedBPETrainer:
         self._processed_files.update(payload.get("processed_files", []))
 
         print(
-            f"Loaded state ← {path} | "
+            f"Loaded state <- {path} | "
             f"files done: {len(self._processed_files)} | "
             f"unique words: {len(self.word_freqs):,}"
         )

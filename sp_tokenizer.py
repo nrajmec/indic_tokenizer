@@ -196,10 +196,16 @@ class IndicSentencePieceTokenizer:
         if normalize:
             text = _normalize(text)
 
+        # SentencePiece processes one sentence per line.
+        # Split on the endoftext separator so each document becomes one line.
+        sentences = [s.strip() for s in text.split("<|endoftext|>") if s.strip()]
+        if not sentences:
+            sentences = [line for line in text.splitlines() if line.strip()]
+
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".txt", delete=False
         ) as tmp:
-            tmp.write(text)
+            tmp.write("\n".join(sentences))
             corpus_path = tmp.name
 
         try:
@@ -352,6 +358,8 @@ class IndicSentencePieceTokenizer:
 
             # ── Performance ───────────────────────────────────────────
             num_threads=n_threads,
+            # allow long sentences (Indic lines can be verbose)
+            max_sentence_length=32768,
 
             # ── Normalisation ─────────────────────────────────────────
             normalization_rule_name="nmt_nfkc",

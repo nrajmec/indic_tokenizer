@@ -326,14 +326,15 @@ def _build_parser():
         ),
     )
 
-    # ── Required ────────────────────────────────────────────────────────────
+    # ── Input corpus (required except during a finalize-only session) ────────
     parser.add_argument(
         "--input", "-i",
-        required=True,
+        default=None,
         metavar="PATH",
         help=(
             "Path to the corpus file (.parquet, .csv, .txt, .json, .jsonl) "
-            "or a glob pattern for chunked training (e.g. 'data/*.parquet')."
+            "or a glob pattern for chunked training (e.g. 'data/*.parquet'). "
+            "Not required when --finalize is used without new data to ingest."
         ),
     )
 
@@ -453,6 +454,23 @@ def _build_parser():
         metavar="N",
         help="Rows processed per batch in chunked mode. Default: 5000.",
     )
+    parser.add_argument(
+        "--finalize",
+        action="store_true",
+        help=(
+            "Finalize chunked BPE training and write vocab.json + merges.json.\n"
+            "Use this flag ONLY after you have finished all accumulation sessions.\n\n"
+            "Two-phase chunked workflow:\n"
+            "  Phase 1 (repeat until all data is ingested):\n"
+            "    python -m indic_tokenizer --input data/part0.parquet \\\n"
+            "        --mode chunked --checkpoint state.json\n\n"
+            "  Phase 2 (run once when ready to produce the tokenizer):\n"
+            "    python -m indic_tokenizer --mode chunked --finalize \\\n"
+            "        --checkpoint state.json --vocab-size 32000\n\n"
+            "When --finalize is set, --input is not required (no ingestion happens).\n"
+            "Only used with --mode chunked."
+        ),
+    )
 
     # ── Misc ─────────────────────────────────────────────────────────────────
     parser.add_argument(
@@ -483,6 +501,16 @@ def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
     verbose = not args.quiet
+
+    # ── Validate --input presence ────────────────────────────────────────────
+    # --input is optional only during a chunked finalize-only session.
+    # Every other path requires it.
+    finalize_only = args.mode == "chunked" and args.finalize and args.input is None
+    if not finalize_only and args.input is None:
+        parser.error(
+            "--input is required unless you are running a finalize-only session "
+            "(--mode chunked --finalize without --input)."
+        )
 
     # ── SentencePiece path ───────────────────────────────────────────────────
     if args.algorithm == "sentencepiece":
@@ -521,26 +549,51 @@ def _cli_bpe_single(args, verbose: bool) -> None:
 
 def _cli_bpe_chunked(args, verbose: bool) -> None:
     """
-    Stream corpus into ChunkedBPETrainer, optionally resuming from a
-    checkpoint, then finalise and save.
+    Chunked BPE — two explicit phases controlled by --finalize.
 
-    Workflow
-    --------
-    1. Create trainer (resume from --checkpoint if it exists).
-    2. Feed --input (file path or glob) into trainer.
-    3. Save checkpoint (if --checkpoint specified).
-    4. Finalise BPE and save vocab + merges.
+    Phase 1 — Accumulation  (no --finalize, repeat as many times as needed)
+    -------------------------------------------------------------------------
+    Ingest the file(s) in --input into the word-frequency table and save
+    (or update) the checkpoint.  Exits without running BPE, so you can
+    safely interrupt, come back, and add more data in the next session.
+
+    Phase 2 — Finalize  (--finalize, run once when all data is ingested)
+    -----------------------------------------------------------------------
+    Load the checkpoint (no new ingestion), run BPE on the accumulated
+    word-frequency table, and write vocab.json + merges.json.
+    --input is not required in this phase.
+    """
+    if args.finalize:
+        _cli_bpe_finalize(args, verbose)
+    else:
+        _cli_bpe_accumulate(args, verbose)
+
+
+
+def _cli_bpe_accumulate(args, verbose: bool) -> None:
+    """
+    Phase 1: ingest one file / glob into the word-frequency table and
+    save the checkpoint.  Does NOT run BPE — safe to call many times.
     """
     import os
+
+    if not args.checkpoint:
+        # Without a checkpoint path there is nowhere to persist progress.
+        # Warn the user so they don't lose work silently.
+        print(
+            "WARNING: --checkpoint was not specified. Word frequencies will "
+            "be lost when this session ends. Pass --checkpoint <path> to "
+            "save progress between sessions."
+        )
 
     tok = IndicBPETokenizer()
     trainer = ChunkedBPETrainer(tok)
 
-    # Resume from an existing checkpoint (skip already-processed files)
+    # Resume from an existing checkpoint — already-processed files are skipped
     if args.checkpoint and os.path.isfile(args.checkpoint):
         trainer.load_state(args.checkpoint)
 
-    # Decide whether input is a glob pattern or a single file
+    # Feed new data — single file or glob pattern
     if any(c in args.input for c in ("*", "?", "[")):
         trainer.add_directory(
             args.input,
@@ -556,9 +609,50 @@ def _cli_bpe_chunked(args, verbose: bool) -> None:
             verbose=verbose,
         )
 
-    # Persist checkpoint so the session can be resumed later
+    # Persist updated checkpoint
     if args.checkpoint:
         trainer.save_state(args.checkpoint)
+
+    if verbose:
+        print(
+            f"\nAccumulation done | unique words: {trainer.unique_word_count:,} "
+            f"| files processed: {trainer.files_done}\n"
+            "Run with --finalize when you have ingested all your data."
+        )
+
+
+def _cli_bpe_finalize(args, verbose: bool) -> None:
+    """
+    Phase 2: load checkpoint, run BPE, write vocab.json + merges.json.
+    No new data is ingested — checkpoint must already exist.
+    """
+    import os
+
+    # Checkpoint is mandatory for finalization — there is nothing to finalize
+    # without previously accumulated word frequencies.
+    if not args.checkpoint:
+        raise SystemExit(
+            "ERROR: --checkpoint is required with --finalize. "
+            "Point it to the .json file saved during accumulation sessions."
+        )
+    if not os.path.isfile(args.checkpoint):
+        raise SystemExit(
+            f"ERROR: checkpoint file not found: {args.checkpoint!r}\n"
+            "Run at least one accumulation session first (without --finalize)."
+        )
+
+    tok = IndicBPETokenizer()
+    trainer = ChunkedBPETrainer(tok)
+    trainer.load_state(args.checkpoint)
+
+    if verbose:
+        print(
+            f"Loaded checkpoint: {args.checkpoint}\n"
+            f"  unique words : {trainer.unique_word_count:,}\n"
+            f"  files done   : {trainer.files_done}\n"
+            f"Running BPE -> vocab_size={args.vocab_size}, "
+            f"min_frequency={args.min_frequency}"
+        )
 
     trainer.finalize_training(
         vocab_size=args.vocab_size,
