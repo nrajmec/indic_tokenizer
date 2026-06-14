@@ -77,7 +77,7 @@ class ChunkedBPETrainer:
 
     Args:
         tokenizer: A fresh IndicBPETokenizer instance (empty vocab).
-        special_tokens: Special tokens to inject.  Defaults to all Claude tokens.
+        special_tokens: Special tokens to inject. 
     """
 
     STATE_VERSION: int = 1

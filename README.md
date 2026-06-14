@@ -1,6 +1,6 @@
 # indic-tokenizer
 
-A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with Claude-style special token support.
+A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with special token support.
 
 Supported scripts: **Devanagari** · **Bengali** · **Gurmukhi** · **Gujarati** · **Oriya** · **Tamil** · **Telugu** · **Kannada** · **Malayalam** · **Sinhala** · **Tibetan** · ASCII
 
@@ -536,7 +536,7 @@ train(
     mode="single",                    # "single" | "chunked"
     output_dir=".",                   # SentencePiece output directory
     model_prefix="indic_tokenizer",   # SentencePiece file prefix
-    special_tokens=None,              # None -> full Claude token set
+    special_tokens=None,              # None -> full token set
     text_column="text",               # column / key for text
     min_frequency=2,                  # chunked BPE: prune low-freq words
     verbose=True,                     # show progress

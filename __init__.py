@@ -156,7 +156,7 @@ def train(
     model_prefix : str
         Filename stem for SentencePiece output (e.g. "indic_sp.model").
     special_tokens : list[str] | None
-        Override the default special tokens.  None uses the full Claude set.
+        Override the default special tokens.
     text_column : str
         Column / key name for text in DataFrames and JSON sources.
     min_frequency : int

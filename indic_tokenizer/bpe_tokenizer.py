@@ -1,7 +1,7 @@
 """
 IndicBPETokenizer — main public class for BPE-based Indic tokenization.
 
-Space / newline convention  (Claude Sonnet style)
+Space / newline convention 
 --------------------------------------------------
 Spaces and newlines are kept as *literal* characters inside tokens.
 A token like " नमस्ते" contains a real leading space — no Ġ/Ċ substitution.
@@ -87,7 +87,7 @@ class IndicBPETokenizer:
         Args:
             text: Raw UTF-8 training corpus (any Indic language or mixed).
             vocab_size: Target vocabulary size.
-            special_tokens: Override the default Claude-style special tokens.
+            special_tokens: Override the default special tokens.
             verbose: Show tqdm progress bar during training.
 
         Note:

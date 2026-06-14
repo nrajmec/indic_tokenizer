@@ -2,12 +2,11 @@
 Constants for the Indic Tokenizer.
 
 Covers all major Indian scripts via Unicode block ranges and provides the
-full set of modern LLM special tokens (Claude / ChatML / Llama-3 style).
+full set of modern LLM special tokens
 
 Space / newline handling
 ------------------------
-Spaces and newlines are kept as *literal* characters inside tokens (Claude
-Sonnet style).  Decoding is therefore a plain string join with no marker
+Spaces and newlines are kept as *literal* characters inside tokens.  Decoding is therefore a plain string join with no marker
 substitution (no GPT-2 Ġ/Ċ encoding needed).
 """
 
@@ -52,7 +51,7 @@ INDIC_NUMERAL_RANGES: Dict[str, Tuple[int, int]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Special tokens  (Claude / ChatML / Llama-3 convention)
+# Special tokens 
 # ---------------------------------------------------------------------------
 SPECIAL_TOKENS: List[str] = [
     # ── Text boundary ──────────────────────────────────────────────────────
@@ -63,7 +62,7 @@ SPECIAL_TOKENS: List[str] = [
     "<|pad|>",           # padding
     "<|unk|>",           # unknown token
 
-    # ── Chat-template (ChatML / Claude style) ─────────────────────────────
+    # ── Chat-template ─────────────────────────────
     "<|im_start|>",
     "<|im_end|>",
     "<|system|>",
@@ -81,12 +80,12 @@ SPECIAL_TOKENS: List[str] = [
     "<|fim_middle|>",
     "<|fim_suffix|>",
 
-    # ── Tool / function-calling (Claude API style) ─────────────────────────
+    # ── Tool / function-calling ─────────────────────────
     "<|tool_use|>",
     "<|tool_result|>",
     "<|tool_call|>",
 
-    # ── Extended thinking (Claude) ─────────────────────────────────────────
+    # ── Extended thinking ─────────────────────────────────────────
     "<|thinking|>",
     "<|/thinking|>",
 
