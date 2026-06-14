@@ -37,6 +37,8 @@ python -m indic_tokenizer -a sentencepiece -m chunked --finalize \
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -75,7 +77,54 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Model name prefix for SentencePiece output")
     p.add_argument("--text-column", metavar="COL", default="text",
                    help="Column name for text in tabular files (default: text)")
+    p.add_argument("--kaggle-dataset", metavar="USER/DATASET",
+                   help="Upload checkpoint + corpus to this Kaggle dataset after each file "
+                        "(format: 'username/dataset-name'). Requires kaggle CLI configured.")
     return p
+
+
+# ---------------------------------------------------------------------------
+# Kaggle upload helper
+# ---------------------------------------------------------------------------
+
+def _upload_to_kaggle(checkpoint_path: Path, corpus_file: Path,
+                      dataset_id: str, phase: int) -> None:
+    """
+    Upload the checkpoint JSON and accumulated corpus file to a Kaggle dataset.
+
+    Both files are needed to resume accumulation on a new Kaggle session:
+    - checkpoint JSON  — tracks which files are done, vocab_size, etc.
+    - corpus .txt      — the accumulated text that SentencePiece will train on.
+
+    Args:
+        checkpoint_path: Path to the checkpoint JSON file.
+        corpus_file:     Path to the accumulated corpus .txt file.
+        dataset_id:      Kaggle dataset in 'username/dataset-name' format.
+        phase:           Phase number used in the version message.
+    """
+    tmp = "/kaggle/working/_upload_tmp"
+    os.makedirs(tmp, exist_ok=True)
+
+    shutil.copy(str(checkpoint_path), tmp)
+    if corpus_file.exists():
+        shutil.copy(str(corpus_file), tmp)
+
+    with open(f"{tmp}/dataset-metadata.json", "w") as f:
+        json.dump({
+            "title": "indic_tokenizer SP Checkpoints",
+            "id": dataset_id,
+            "licenses": [{"name": "CC0-1.0"}],
+        }, f)
+
+    ret = os.system(
+        f'kaggle datasets version -p {tmp} -m "Phase {phase} checkpoint" --dir-mode zip'
+    )
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    if ret == 0:
+        print(f"  Uploaded checkpoint to kaggle.com/datasets/{dataset_id}")
+    else:
+        print("  Upload failed — checkpoint and corpus are still in working directory.")
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +427,13 @@ def run_sentencepiece_chunked_accumulate(args):
             )
             print(f"  → {len(sentences):,} sentences added "
                   f"({total_sentences:,} total). Checkpoint updated.")
+
+            if args.kaggle_dataset:
+                _upload_to_kaggle(
+                    checkpoint_path, corpus_file,
+                    dataset_id=args.kaggle_dataset,
+                    phase=len(processed),
+                )
 
     print(f"\nAccumulation complete.")
     print(f"  Files processed : {len(processed)}")
