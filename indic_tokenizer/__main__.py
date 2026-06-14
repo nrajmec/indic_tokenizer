@@ -79,8 +79,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text-column", metavar="COL", default="text",
                    help="Column name for text in tabular files (default: text)")
     p.add_argument("--kaggle-dataset", metavar="USER/DATASET",
-                   help="Upload checkpoint + corpus to this Kaggle dataset after each file "
+                   help="Upload the trained model to this Kaggle dataset after finalize "
                         "(format: 'username/dataset-name'). Requires kaggle CLI configured.")
+    p.add_argument("--session-timeout", type=int, default=42300, metavar="SECS",
+                   help="Max seconds to let SentencePiece training run before stopping "
+                        "and uploading whatever was produced (default: 42300 = 11h45m).")
     return p
 
 
@@ -88,40 +91,34 @@ def _build_parser() -> argparse.ArgumentParser:
 # Kaggle upload helper
 # ---------------------------------------------------------------------------
 
-def _upload_to_kaggle(checkpoint_path: Path, corpus_file: Path,
-                      dataset_id: str, phase: int) -> None:
+def _upload_model_to_kaggle(model_path: Path, vocab_path: Path,
+                             dataset_id: str) -> None:
     """
-    Upload the checkpoint JSON and accumulated corpus file to a Kaggle dataset.
-
-    Both files are needed to resume accumulation on a new Kaggle session:
-    - checkpoint JSON  — tracks which files are done, vocab_size, etc.
-    - corpus .txt      — the accumulated text that SentencePiece will train on.
+    Upload the trained .model and .vocab files to a Kaggle dataset.
 
     Args:
-        checkpoint_path: Path to the checkpoint JSON file.
-        corpus_file:     Path to the accumulated corpus .txt file.
-        dataset_id:      Kaggle dataset in 'username/dataset-name' format.
-        phase:           Phase number used in the version message.
+        model_path:  Path to the .model file produced by SentencePiece.
+        vocab_path:  Path to the .vocab file produced by SentencePiece.
+        dataset_id:  Kaggle dataset in 'username/dataset-name' format.
     """
     tmp = "/kaggle/working/_upload_tmp"
     os.makedirs(tmp, exist_ok=True)
 
-    shutil.copy(str(checkpoint_path), tmp)
-    if corpus_file.exists():
-        shutil.copy(str(corpus_file), tmp)
+    shutil.copy(str(model_path), tmp)
+    if vocab_path.exists():
+        shutil.copy(str(vocab_path), tmp)
 
     with open(f"{tmp}/dataset-metadata.json", "w") as f:
         json.dump({
-            "title": "indic_tokenizer SP Checkpoints",
+            "title": "indic_tokenizer SP Model",
             "id": dataset_id,
             "licenses": [{"name": "CC0-1.0"}],
         }, f)
 
-    msg = f"Phase {phase} checkpoint"
-    # Try to add a new version to an existing dataset first.
-    # Falls back to creating the dataset on the very first upload.
+    # Try to version an existing dataset; create it if it doesn't exist yet.
     ret = subprocess.run(
-        ["kaggle", "datasets", "version", "-p", tmp, "-m", msg, "--dir-mode", "zip"]
+        ["kaggle", "datasets", "version", "-p", tmp,
+         "-m", "Trained SentencePiece model", "--dir-mode", "zip"]
     ).returncode
     if ret != 0:
         print("  Version update failed — attempting to create dataset (first upload) …")
@@ -132,9 +129,9 @@ def _upload_to_kaggle(checkpoint_path: Path, corpus_file: Path,
     shutil.rmtree(tmp, ignore_errors=True)
 
     if ret == 0:
-        print(f"  Uploaded checkpoint to kaggle.com/datasets/{dataset_id}")
+        print(f"  Model uploaded to kaggle.com/datasets/{dataset_id}")
     else:
-        print("  Upload failed — checkpoint and corpus are still in working directory.")
+        print(f"  Upload failed — model is saved locally at {model_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -444,19 +441,20 @@ def run_sentencepiece_chunked_accumulate(args):
             print(f"  → {len(sentences):,} sentences added "
                   f"({total_sentences:,} total). Checkpoint updated.")
 
-            if args.kaggle_dataset:
-                corpus_fh.flush()  # ensure buffer is on disk before shutil.copy reads it
-                _upload_to_kaggle(
-                    checkpoint_path, corpus_file,
-                    dataset_id=args.kaggle_dataset,
-                    phase=len(processed),
-                )
-
     print(f"\nAccumulation complete.")
     print(f"  Files processed : {len(processed)}")
     print(f"  Total sentences : {total_sentences:,}")
     print(f"  Corpus file     : {corpus_file}")
     print(f"Run with --finalize to train the SentencePiece model.")
+
+
+# ---------------------------------------------------------------------------
+# SentencePiece training worker (module-level so multiprocessing can pickle it)
+# ---------------------------------------------------------------------------
+
+def _sp_train_worker(kwargs: dict) -> None:
+    import sentencepiece as spm  # type: ignore[import]
+    spm.SentencePieceTrainer.train(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +471,7 @@ def run_sentencepiece_chunked_finalize(args):
         sys.exit(1)
 
     try:
-        import sentencepiece as spm  # type: ignore[import]
+        import sentencepiece  # validate installation before spawning child  # noqa: F401
     except ImportError:
         print("ERROR: sentencepiece is not installed.  "
               "Run:  pip install sentencepiece", file=sys.stderr)
@@ -513,12 +511,23 @@ def run_sentencepiece_chunked_finalize(args):
 
     total_sentences = data.get("total_sentences", 0)
     processed_count = len(data.get("processed_files", []))
+    timeout_secs = getattr(args, "session_timeout", 42300)
+    h, m = divmod(timeout_secs // 60, 60)
+
     print(f"Training SentencePiece on {total_sentences:,} sentences "
           f"from {processed_count} file(s) (vocab_size={vocab_size}) …")
-    print(f"  Corpus : {corpus_file}")
-    print(f"  Output : {prefix}.model / {prefix}.vocab")
+    print(f"  Corpus          : {corpus_file}")
+    print(f"  Output          : {prefix}.model / {prefix}.vocab")
+    print(f"  Session timeout : {h}h {m}m ({timeout_secs:,}s)")
 
-    spm.SentencePieceTrainer.train(
+    # Run training in a child process so we can enforce the session timeout.
+    # spm.SentencePieceTrainer.train() is a blocking C++ call that cannot be
+    # interrupted from the same thread; terminate() on the child process is the
+    # only reliable way to stop it.
+    import multiprocessing
+    import time
+
+    train_kwargs = dict(
         input=str(corpus_file),
         model_prefix=prefix,
         vocab_size=vocab_size,
@@ -529,9 +538,37 @@ def run_sentencepiece_chunked_finalize(args):
         bos_id=1,
         eos_id=2,
     )
+    proc = multiprocessing.Process(target=_sp_train_worker, args=(train_kwargs,))
+    t0 = time.time()
+    proc.start()
+    proc.join(timeout=timeout_secs)
 
-    print(f"Saved model  → {prefix}.model")
-    print(f"Saved vocab  → {prefix}.vocab")
+    elapsed = int(time.time() - t0)
+    model_path = Path(f"{prefix}.model")
+    vocab_path = Path(f"{prefix}.vocab")
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        print(f"\nWARNING: Training stopped after {elapsed // 3600}h "
+              f"{(elapsed % 3600) // 60}m (session timeout reached).")
+        if not model_path.exists():
+            print("No model file was produced — SentencePiece only writes the model "
+                  "on successful completion. Re-run with a longer --session-timeout "
+                  "or reduce --vocab-size.")
+            return
+    else:
+        print(f"\nTraining complete in "
+              f"{elapsed // 3600}h {(elapsed % 3600) // 60}m {elapsed % 60}s.")
+
+    if model_path.exists():
+        print(f"Saved model  → {model_path}")
+        print(f"Saved vocab  → {vocab_path}")
+        if args.kaggle_dataset:
+            print(f"Uploading model to Kaggle dataset '{args.kaggle_dataset}' …")
+            _upload_model_to_kaggle(model_path, vocab_path, args.kaggle_dataset)
+    else:
+        print("ERROR: Model file not found after training.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
