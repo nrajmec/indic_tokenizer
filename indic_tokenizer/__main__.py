@@ -5,7 +5,8 @@ Algorithms
 ----------
 bpe / single     — train BPE on the full corpus in one pass (small/medium data)
 bpe / chunked    — word-frequency BPE with two-phase checkpointing (large data)
-sentencepiece    — wrap the sentencepiece library
+sentencepiece / single  — train SentencePiece on one or more files in one pass
+sentencepiece / chunked — two-phase: accumulate files into corpus, then finalize
 
 Examples
 --------
@@ -21,9 +22,17 @@ python -m indic_tokenizer -i corpus.txt -a bpe -m chunked \
 python -m indic_tokenizer -a bpe -m chunked --finalize -v 8000 \
     --checkpoint state.json --vocab-out vocab.json --merges-out merges.json
 
-# SentencePiece
-python -m indic_tokenizer -i corpus.txt -a sentencepiece -v 8000 \
+# SentencePiece single (one or more files)
+python -m indic_tokenizer -i file1.txt file2.txt -a sentencepiece -v 8000 \
     -o models --model-prefix mymodel
+
+# SentencePiece chunked — phase 1 (accumulate multiple files, resumable)
+python -m indic_tokenizer -i file1.txt file2.txt file3.txt \
+    -a sentencepiece -m chunked --checkpoint sp_state.json -v 8000
+
+# SentencePiece chunked — phase 2 (train on accumulated corpus)
+python -m indic_tokenizer -a sentencepiece -m chunked --finalize \
+    --checkpoint sp_state.json -o models --model-prefix mymodel
 """
 
 import argparse
@@ -42,12 +51,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m indic_tokenizer",
         description="Train a tokenizer for Indic scripts.",
     )
-    p.add_argument("-i", "--input", metavar="FILE",
-                   help="Input corpus file (.txt / .csv / .parquet / .json / .jsonl)")
+    p.add_argument("-i", "--input", metavar="FILE", nargs="+",
+                   help="One or more input corpus files (.txt / .csv / .parquet / .json / .jsonl)")
     p.add_argument("-a", "--algorithm", choices=["bpe", "sentencepiece"],
                    default="bpe", help="Tokenizer algorithm (default: bpe)")
     p.add_argument("-m", "--mode", choices=["single", "chunked"],
-                   default="single", help="BPE mode (default: single)")
+                   default="single", help="Training mode (default: single)")
     p.add_argument("-v", "--vocab-size", type=int, metavar="N",
                    help="Target vocabulary size")
     p.add_argument("--vocab-out", metavar="FILE",
@@ -55,11 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merges-out", metavar="FILE",
                    help="Output path for merges JSON")
     p.add_argument("--checkpoint", metavar="FILE",
-                   help="Checkpoint file for chunked BPE (phase 1 output / phase 2 input)")
+                   help="Checkpoint file for chunked mode (phase 1 output / phase 2 input)")
     p.add_argument("--min-frequency", type=int, default=1, metavar="N",
                    help="Minimum word frequency for chunked BPE (default: 1)")
     p.add_argument("--finalize", action="store_true",
-                   help="Run phase 2 of chunked BPE (build merges from checkpoint)")
+                   help="Run phase 2 of chunked training (build model from checkpoint)")
     p.add_argument("-o", "--output-dir", metavar="DIR", default=".",
                    help="Output directory for SentencePiece model files")
     p.add_argument("--model-prefix", metavar="PREFIX", default="sp_model",
@@ -77,6 +86,10 @@ def run_bpe_single(args):
     if not args.input:
         print("ERROR: -i / --input is required for BPE single mode.", file=sys.stderr)
         sys.exit(1)
+    if len(args.input) > 1:
+        print("ERROR: BPE single mode accepts only one input file. "
+              "Use -m chunked for multiple files.", file=sys.stderr)
+        sys.exit(1)
     if not args.vocab_size:
         print("ERROR: -v / --vocab-size is required.", file=sys.stderr)
         sys.exit(1)
@@ -86,10 +99,11 @@ def run_bpe_single(args):
 
     from .bpe_tokenizer import IndicBPETokenizer
 
+    input_file = args.input[0]
     tok = IndicBPETokenizer()
-    print(f"Loading corpus from {args.input} …")
+    print(f"Loading corpus from {input_file} …")
     tok.train_from_file(
-        path=args.input,
+        path=input_file,
         vocab_size=args.vocab_size,
         text_column=args.text_column,
         verbose=True,
@@ -114,9 +128,10 @@ def run_bpe_chunked_accumulate(args):
     from .data_loader import IndicDataLoader
     from .preprocessor import pretokenize
 
-    print(f"Loading corpus from {args.input} …")
+    input_file = args.input[0]
+    print(f"Loading corpus from {input_file} …")
     loader = IndicDataLoader(text_column=args.text_column)
-    corpus = loader.load(args.input)
+    corpus = loader.load(input_file)
 
     print("Building word-frequency table …")
     freq: Counter = Counter()
@@ -204,7 +219,7 @@ def run_bpe_chunked_finalize(args):
 
 
 # ---------------------------------------------------------------------------
-# SentencePiece
+# SentencePiece — single mode (one or more files, one training pass)
 # ---------------------------------------------------------------------------
 
 def run_sentencepiece(args):
@@ -222,30 +237,218 @@ def run_sentencepiece(args):
               "Run:  pip install sentencepiece", file=sys.stderr)
         sys.exit(1)
 
-    from .data_loader import IndicDataLoader
-
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = str(out_dir / args.model_prefix)
 
-    # SentencePiece can train directly from a .txt file; for other formats
-    # we write a temp file.
-    input_path = Path(args.input)
-    if input_path.suffix.lower() == ".txt":
-        train_input = str(input_path)
+    all_txt = all(Path(f).suffix.lower() == ".txt" for f in args.input)
+    tmp_path = None
+
+    if all_txt:
+        # Pass comma-separated list — SPM natively supports multi-file input
+        train_input = ",".join(args.input)
     else:
-        print(f"Loading corpus from {args.input} for SentencePiece …")
+        from .data_loader import IndicDataLoader
         loader = IndicDataLoader(text_column=args.text_column)
-        corpus = loader.load(args.input)
+        parts = []
+        for f in args.input:
+            print(f"Loading {f} …")
+            parts.append(loader.load(f))
+        corpus = "\n".join(parts)
         tmp_path = out_dir / "_sp_tmp_corpus.txt"
         tmp_path.write_text(corpus, encoding="utf-8")
         train_input = str(tmp_path)
 
     print(f"Training SentencePiece model (vocab_size={args.vocab_size}) …")
+    try:
+        spm.SentencePieceTrainer.train(
+            input=train_input,
+            model_prefix=prefix,
+            vocab_size=args.vocab_size,
+            character_coverage=1.0,
+            model_type="bpe",
+            pad_id=3,
+            unk_id=0,
+            bos_id=1,
+            eos_id=2,
+        )
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
+
+    print(f"Saved model  → {prefix}.model")
+    print(f"Saved vocab  → {prefix}.vocab")
+
+
+# ---------------------------------------------------------------------------
+# SentencePiece chunked — phase 1: accumulate files into corpus
+# ---------------------------------------------------------------------------
+
+def run_sentencepiece_chunked_accumulate(args):
+    """
+    Process each input file and append its sentences to a growing corpus .txt
+    file. Saves a checkpoint JSON after every file so the run is resumable.
+    """
+    if not args.input:
+        print("ERROR: -i / --input is required for SP chunked accumulate.", file=sys.stderr)
+        sys.exit(1)
+    if not args.checkpoint:
+        print("ERROR: --checkpoint is required for SP chunked mode.", file=sys.stderr)
+        sys.exit(1)
+    if not args.vocab_size:
+        print("ERROR: -v / --vocab-size is required.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sentencepiece  # validate installation early  # noqa: F401
+    except ImportError:
+        print("ERROR: sentencepiece is not installed.  "
+              "Run:  pip install sentencepiece", file=sys.stderr)
+        sys.exit(1)
+
+    checkpoint_path = Path(args.checkpoint)
+
+    # Load existing checkpoint (resume) or initialise fresh state
+    if checkpoint_path.exists():
+        data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if data.get("algorithm") != "sentencepiece":
+            print("ERROR: Checkpoint is not a SentencePiece checkpoint.", file=sys.stderr)
+            sys.exit(1)
+        processed = set(data["processed_files"])
+        corpus_file = Path(data["corpus_file"])
+        total_sentences = data.get("total_sentences", 0)
+        print(f"Resuming from checkpoint: {len(processed)} file(s) already processed.")
+    else:
+        processed = set()
+        # Corpus file lives alongside the checkpoint: <stem>_corpus.txt
+        corpus_file = checkpoint_path.with_name(checkpoint_path.stem + "_corpus.txt")
+        total_sentences = 0
+
+    corpus_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Determine which files still need processing (by resolved absolute path)
+    pending = [f for f in args.input
+               if str(Path(f).resolve()) not in processed]
+
+    if not pending:
+        print("All files already processed. Run with --finalize to train the model.")
+        return
+
+    from .data_loader import IndicDataLoader
+    loader = IndicDataLoader(text_column=args.text_column)
+
+    # Append mode: already-processed files' content is already in corpus_file
+    with open(str(corpus_file), "a", encoding="utf-8") as corpus_fh:
+        for file_path in pending:
+            abs_path = str(Path(file_path).resolve())
+            print(f"Processing: {file_path} …")
+
+            raw = loader.load(file_path)
+
+            # Normalise to one sentence per line (SPM's expected format)
+            sentences = [s.strip() for s in raw.split("<|endoftext|>") if s.strip()]
+            if not sentences:
+                sentences = [ln for ln in raw.splitlines() if ln.strip()]
+
+            corpus_fh.write("\n".join(sentences))
+            corpus_fh.write("\n")
+            total_sentences += len(sentences)
+            processed.add(abs_path)
+
+            # Determine which of the original inputs are still pending
+            pending_remaining = [
+                f for f in args.input
+                if str(Path(f).resolve()) not in processed
+            ]
+
+            # Write checkpoint immediately after each file (fault-tolerance)
+            checkpoint_data = {
+                "algorithm": "sentencepiece",
+                "corpus_file": str(corpus_file.resolve()),
+                "processed_files": sorted(processed),
+                "pending_files": pending_remaining,
+                "total_sentences": total_sentences,
+                "vocab_size": args.vocab_size,
+                "model_type": "bpe",
+                "character_coverage": 1.0,
+            }
+            checkpoint_path.write_text(
+                json.dumps(checkpoint_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"  → {len(sentences):,} sentences added "
+                  f"({total_sentences:,} total). Checkpoint updated.")
+
+    print(f"\nAccumulation complete.")
+    print(f"  Files processed : {len(processed)}")
+    print(f"  Total sentences : {total_sentences:,}")
+    print(f"  Corpus file     : {corpus_file}")
+    print(f"Run with --finalize to train the SentencePiece model.")
+
+
+# ---------------------------------------------------------------------------
+# SentencePiece chunked — phase 2: train on accumulated corpus
+# ---------------------------------------------------------------------------
+
+def run_sentencepiece_chunked_finalize(args):
+    """
+    Load the checkpoint produced by phase 1 and train SentencePiece on the
+    accumulated corpus file.
+    """
+    if not args.checkpoint:
+        print("ERROR: --checkpoint is required for SP chunked finalize.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sentencepiece as spm  # type: ignore[import]
+    except ImportError:
+        print("ERROR: sentencepiece is not installed.  "
+              "Run:  pip install sentencepiece", file=sys.stderr)
+        sys.exit(1)
+
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.exists():
+        print(f"ERROR: Checkpoint not found: {args.checkpoint}", file=sys.stderr)
+        sys.exit(1)
+
+    data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    if data.get("algorithm") != "sentencepiece":
+        print("ERROR: Checkpoint is not a SentencePiece checkpoint. "
+              "(Did you mean to use the BPE finalize command?)", file=sys.stderr)
+        sys.exit(1)
+
+    corpus_file = Path(data["corpus_file"])
+    if not corpus_file.exists():
+        print(f"ERROR: Accumulated corpus file not found: {corpus_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # CLI -v takes precedence; checkpoint value is the fallback
+    vocab_size = args.vocab_size or data.get("vocab_size")
+    if not vocab_size:
+        print("ERROR: -v / --vocab-size is required (or must be stored in checkpoint).",
+              file=sys.stderr)
+        sys.exit(1)
+
+    pending = data.get("pending_files", [])
+    if pending:
+        print(f"WARNING: {len(pending)} file(s) not yet accumulated: {pending}")
+        print("Proceeding with the corpus accumulated so far.")
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = str(out_dir / args.model_prefix)
+
+    total_sentences = data.get("total_sentences", 0)
+    processed_count = len(data.get("processed_files", []))
+    print(f"Training SentencePiece on {total_sentences:,} sentences "
+          f"from {processed_count} file(s) (vocab_size={vocab_size}) …")
+    print(f"  Corpus : {corpus_file}")
+    print(f"  Output : {prefix}.model / {prefix}.vocab")
+
     spm.SentencePieceTrainer.train(
-        input=train_input,
+        input=str(corpus_file),
         model_prefix=prefix,
-        vocab_size=args.vocab_size,
+        vocab_size=vocab_size,
         character_coverage=1.0,
         model_type="bpe",
         pad_id=3,
@@ -253,6 +456,7 @@ def run_sentencepiece(args):
         bos_id=1,
         eos_id=2,
     )
+
     print(f"Saved model  → {prefix}.model")
     print(f"Saved vocab  → {prefix}.vocab")
 
@@ -266,7 +470,13 @@ def main():
     args = parser.parse_args()
 
     if args.algorithm == "sentencepiece":
-        run_sentencepiece(args)
+        if args.mode == "chunked":
+            if args.finalize:
+                run_sentencepiece_chunked_finalize(args)
+            else:
+                run_sentencepiece_chunked_accumulate(args)
+        else:
+            run_sentencepiece(args)
         return
 
     # BPE path
