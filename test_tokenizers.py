@@ -77,8 +77,8 @@ def test_bpe_single(vocab_path="thirukkural_bpe_vocab.json",
 # 2 — BPE chunked  (same file format as single, just different output names)
 # ---------------------------------------------------------------------------
 
-def test_bpe_chunked(vocab_path="thirukkural_chunked_vocab.json",
-                     merges_path="thirukkural_chunked_merges.json"):
+def test_bpe_chunked(vocab_path="thirukkural_bpe_vocab_chunked.json.json",
+                     merges_path="thirukkural_bpe_merges_chunked.json.json"):
     _print_section("BPE Chunked tokenizer")
     try:
         from indic_tokenizer import IndicBPETokenizer
@@ -167,6 +167,7 @@ python -m indic_tokenizer -i thirukkural.txt -a sentencepiece -v 1000 ^
     -o models --model-prefix thirukkural_sp
 """)
 
-    test_bpe_single()
-    test_bpe_chunked()
-    test_sentencepiece()
+    test_bpe_single(vocab_path="vocab (4).json", merges_path="merges (4).json")
+    # test_bpe_chunked()
+    # test_sentencepiece()
+

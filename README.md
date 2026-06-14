@@ -1,6 +1,6 @@
 # indic-tokenizer
 
-A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with special token support.
+A BPE and SentencePiece tokenizer built from scratch for **all major Indian languages**, with special token support. It has suport for both BPE and SentencePieceBPE algorithm.
 
 Supported scripts: **Devanagari** · **Bengali** · **Gurmukhi** · **Gujarati** · **Oriya** · **Tamil** · **Telugu** · **Kannada** · **Malayalam** · **Sinhala** · **Tibetan** · ASCII
 
