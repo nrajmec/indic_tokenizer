@@ -402,6 +402,12 @@ def run_sentencepiece_chunked_accumulate(args):
             abs_path = str(Path(file_path).resolve())
             print(f"Processing: {file_path} …")
 
+            if not Path(file_path).is_file():
+                print(f"  ERROR: File not found: {file_path}", file=sys.stderr)
+                print("  Tip: Kaggle datasets are mounted at /kaggle/input/<dataset-slug>/",
+                      file=sys.stderr)
+                sys.exit(1)
+
             raw = loader.load(file_path)
 
             # Normalise to one sentence per line (SPM's expected format)
