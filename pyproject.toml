@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "indic_tokenizer"
+version = "0.1.0"
+description = "BPE tokenizer for Indic scripts (Devanagari, Bengali, Tamil, Telugu, and more)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "regex>=2023.0",
+    "numpy>=1.24",
+    "pandas>=1.5",
+    "pyarrow>=10",
+    "tqdm>=4.0",
+    "datasets>=2.0",
+    "huggingface_hub>=0.16",
+    "sentencepiece>=0.1.99",
+]
+
+[project.urls]
+Homepage = "https://github.com/nrajmec/indic_tokenizer"
+Repository = "https://github.com/nrajmec/indic_tokenizer"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["indic_tokenizer*"]
