@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -116,9 +117,18 @@ def _upload_to_kaggle(checkpoint_path: Path, corpus_file: Path,
             "licenses": [{"name": "CC0-1.0"}],
         }, f)
 
-    ret = os.system(
-        f'kaggle datasets version -p {tmp} -m "Phase {phase} checkpoint" --dir-mode zip'
-    )
+    msg = f"Phase {phase} checkpoint"
+    # Try to add a new version to an existing dataset first.
+    # Falls back to creating the dataset on the very first upload.
+    ret = subprocess.run(
+        ["kaggle", "datasets", "version", "-p", tmp, "-m", msg, "--dir-mode", "zip"]
+    ).returncode
+    if ret != 0:
+        print("  Version update failed — attempting to create dataset (first upload) …")
+        ret = subprocess.run(
+            ["kaggle", "datasets", "create", "-p", tmp, "--dir-mode", "zip"]
+        ).returncode
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if ret == 0:
@@ -429,6 +439,7 @@ def run_sentencepiece_chunked_accumulate(args):
                   f"({total_sentences:,} total). Checkpoint updated.")
 
             if args.kaggle_dataset:
+                corpus_fh.flush()  # ensure buffer is on disk before shutil.copy reads it
                 _upload_to_kaggle(
                     checkpoint_path, corpus_file,
                     dataset_id=args.kaggle_dataset,
